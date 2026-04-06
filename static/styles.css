@@ -465,6 +465,17 @@ strong {
   margin-bottom: 14px;
 }
 
+.report-toolbar {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(220px, 0.55fr);
+  gap: 14px;
+  margin-bottom: 16px;
+}
+
+.report-toolbar-field {
+  margin: 0;
+}
+
 .head-actions {
   display: flex;
   gap: 10px;
@@ -713,6 +724,23 @@ textarea::placeholder {
   border-color: rgba(184, 79, 34, 0.28);
 }
 
+.recent-card {
+  position: relative;
+  cursor: pointer;
+  transition: transform 160ms ease, border-color 160ms ease, background 160ms ease, box-shadow 160ms ease;
+}
+
+.recent-card:hover {
+  transform: translateY(-1px);
+}
+
+.recent-card.active {
+  border-color: rgba(239, 106, 46, 0.32);
+  background:
+    linear-gradient(160deg, rgba(239, 106, 46, 0.1), transparent 44%),
+    rgba(255, 251, 246, 0.99);
+}
+
 .recent-top > div {
   display: grid;
   gap: 4px;
@@ -916,6 +944,19 @@ textarea::placeholder {
   border-radius: 999px;
   background: rgba(28, 52, 73, 0.06);
   color: var(--text);
+}
+
+.report-pagination {
+  display: flex;
+  justify-content: flex-end;
+  align-items: center;
+  gap: 12px;
+  margin-top: 16px;
+}
+
+.pagination-meta {
+  color: var(--muted);
+  font-size: 13px;
 }
 
 .lesson-tags {
@@ -1200,6 +1241,10 @@ textarea::placeholder {
     align-items: stretch;
   }
 
+  .report-toolbar {
+    grid-template-columns: 1fr;
+  }
+
   .auth-tip-grid {
     grid-template-columns: 1fr;
   }
@@ -1257,6 +1302,11 @@ textarea::placeholder {
   .head-actions {
     width: 100%;
     flex-direction: column;
+  }
+
+  .report-pagination {
+    justify-content: space-between;
+    flex-wrap: wrap;
   }
 }
 

@@ -13,6 +13,9 @@ const weeklyPlan = document.getElementById("weekly-plan");
 const sessionTemplates = document.getElementById("session-templates");
 const parentTemplate = document.getElementById("parent-template");
 const recentReports = document.getElementById("recent-reports");
+const reportSearchEl = document.getElementById("report-search");
+const reportFilterEl = document.getElementById("report-filter");
+const reportPaginationEl = document.getElementById("report-pagination");
 const saveMessage = document.getElementById("save-message");
 const athleteList = document.getElementById("athlete-list");
 const athleteSearchEl = document.getElementById("athlete-search");
@@ -69,6 +72,8 @@ let currentAthleteId = "";
 let selectedLessonId = "";
 let currentReport = null;
 let authState = { authenticated: false, user: null };
+let currentReportPage = 1;
+const REPORTS_PER_PAGE = 6;
 
 function formatUpdatedAt(value) {
   return value ? String(value).replace("T", " ") : "刚刚";
@@ -92,7 +97,7 @@ function applyAuthState(state) {
   authRolePill.textContent = authenticated ? authState.user.role_label || authState.user.role : "未登录";
   authRolePill.dataset.variant = authenticated ? "success" : "idle";
   authUserText.textContent = authenticated
-    ? `${authState.user.username} 已登录，当前权限：${authState.user.role_label || authState.user.role}`
+    ? `${authState.user.username} 已登录，当前权限：${authState.user.role_label || authState.user.role} · ${authState.user.store_name || "神兽体育"}`
     : "请先登录后再使用教练工作台。";
   logoutBtn.hidden = !authenticated;
   if (!authenticated) {
@@ -128,6 +133,23 @@ function filteredAthletes(items = []) {
     const name = String(item.name || "").toLowerCase();
     const phone = String(item.guardian_phone || "").toLowerCase();
     return name.includes(keyword) || phone.includes(keyword);
+  });
+}
+
+function filteredReports(items = []) {
+  const keyword = reportSearchEl?.value?.trim().toLowerCase() || "";
+  const filterValue = reportFilterEl?.value || "all";
+  return items.filter((item) => {
+    const matchesKeyword =
+      !keyword ||
+      String(item.athlete_name || "").toLowerCase().includes(keyword) ||
+      String(item.goal || "").toLowerCase().includes(keyword) ||
+      String(item.date || "").toLowerCase().includes(keyword) ||
+      String(item.summary || "").toLowerCase().includes(keyword);
+    if (!matchesKeyword) return false;
+    if (filterValue === "all") return true;
+    if (filterValue === "media") return Number(item.media_count || 0) > 0;
+    return String(item.engagement || "") === filterValue;
   });
 }
 
@@ -937,18 +959,62 @@ function renderParentTemplate(plan) {
   `;
 }
 
+function buildLessonContentText(lesson) {
+  return (lesson?.blocks || [])
+    .map((block) => `${block.time_range} ${block.phase}：${block.title}（${block.sets_reps}，间歇 ${block.rest}，强度 ${block.intensity}）`)
+    .join("；");
+}
+
+function applyLessonToReportDraft(lesson) {
+  if (!lesson) return;
+  reportDurationEl.value = String(lesson.duration_min || currentPlan?.plan_overview?.session_duration_min || reportDurationEl.value);
+  sessionContentEl.value = buildLessonContentText(lesson);
+  if (!coachNotesEl.value.trim()) {
+    coachNotesEl.value = lesson.coach_summary || "";
+  }
+  if (!homeworkEl.value.trim()) {
+    homeworkEl.value = currentPlan?.parent_report_template?.homework || "";
+  }
+}
+
+function renderReportPagination(totalItems = 0) {
+  if (!reportPaginationEl) return;
+  if (totalItems <= REPORTS_PER_PAGE) {
+    reportPaginationEl.innerHTML = "";
+    return;
+  }
+  const totalPages = Math.max(1, Math.ceil(totalItems / REPORTS_PER_PAGE));
+  currentReportPage = Math.min(currentReportPage, totalPages);
+  reportPaginationEl.innerHTML = `
+    <button class="ghost pagination-btn" type="button" data-report-page="${currentReportPage - 1}" ${currentReportPage <= 1 ? "disabled" : ""}>上一页</button>
+    <span class="pagination-meta">第 ${currentReportPage} / ${totalPages} 页，共 ${totalItems} 份报告</span>
+    <button class="ghost pagination-btn" type="button" data-report-page="${currentReportPage + 1}" ${currentReportPage >= totalPages ? "disabled" : ""}>下一页</button>
+  `;
+}
+
 function renderRecentReports(items = []) {
   const deleteAction = isAdmin()
     ? (item) => `<button class="card-delete-btn" type="button" data-delete-report-id="${item.id}" aria-label="删除 ${item.athlete_name} 的训练报告">删除</button>`
     : () => "";
+  const filtered = filteredReports(items);
   if (!items.length) {
     recentReports.innerHTML = `<div class="recent-empty">还没有保存的训练报告，完成一次课后记录后会显示在这里。</div>`;
+    renderReportPagination(0);
     return;
   }
-  recentReports.innerHTML = items
+  if (!filtered.length) {
+    recentReports.innerHTML = `<div class="recent-empty">没有找到匹配的训练报告，请换一个搜索词或筛选条件。</div>`;
+    renderReportPagination(0);
+    return;
+  }
+  const totalPages = Math.max(1, Math.ceil(filtered.length / REPORTS_PER_PAGE));
+  currentReportPage = Math.min(currentReportPage, totalPages);
+  const start = (currentReportPage - 1) * REPORTS_PER_PAGE;
+  const visibleItems = filtered.slice(start, start + REPORTS_PER_PAGE);
+  recentReports.innerHTML = visibleItems
     .map(
       (item) => `
-        <article class="recent-card">
+        <article class="recent-card ${currentReport?.id === item.id ? "active" : ""}" data-report-id="${item.id}">
           <div class="recent-top">
             <div>
               <strong>${item.athlete_name}</strong>
@@ -962,6 +1028,7 @@ function renderRecentReports(items = []) {
       `,
     )
     .join("");
+  renderReportPagination(filtered.length);
 }
 
 function buildTrendSvg(points = []) {
@@ -1368,9 +1435,16 @@ function buildParentShareHtml(report) {
   </html>`;
 }
 
-function openParentShareWindow(report) {
+function openParentShareWindow(report, options = {}) {
   if (!report) return;
-  const html = buildParentShareHtml(report);
+  const autoPrint = Boolean(options.autoPrint);
+  let html = buildParentShareHtml(report);
+  if (autoPrint) {
+    html = html.replace(
+      "</body>",
+      `<script>window.addEventListener("load",()=>setTimeout(()=>window.print(),320));</script></body>`,
+    );
+  }
   const blob = new Blob([html], { type: "text/html;charset=utf-8" });
   const shareUrl = URL.createObjectURL(blob);
   const shareWindow = window.open(shareUrl, "_blank", "width=980,height=1200");
@@ -1380,6 +1454,10 @@ function openParentShareWindow(report) {
   }
   shareWindow.focus();
   setTimeout(() => URL.revokeObjectURL(shareUrl), 3000);
+}
+
+function openParentReportPdfWindow(report) {
+  openParentShareWindow(report, { autoPrint: true });
 }
 
 function renderParentReportPreview(report) {
@@ -1435,7 +1513,10 @@ function renderParentReportPreview(report) {
           <strong>${report.parent_friendly.headline}</strong>
           <p>${report.parent_friendly.intro}</p>
         </div>
-        <button id="open-parent-share-btn" class="ghost accent-ghost" type="button">打开微信长图版</button>
+        <div class="head-actions">
+          <button id="refresh-parent-share-btn" class="ghost accent-ghost" type="button">重新生成长图</button>
+          <button id="export-parent-pdf-btn" class="ghost" type="button">导出 PDF</button>
+        </div>
       </div>
       <div class="tag-row">
         ${report.parent_friendly.tags.map((tag) => `<span>${tag}</span>`).join("")}
@@ -1502,6 +1583,7 @@ async function loadBootstrap() {
   renderOptions(sessionDurationEl, bootstrapData.durations, (value) => `${value} 分钟`);
   renderOptions(reportDurationEl, bootstrapData.durations, (value) => `${value} 分钟`);
   renderAthleteList(bootstrapData.athlete_profiles || []);
+  currentReportPage = 1;
   renderRecentReports(bootstrapData.recent_reports || []);
   sessionDateEl.value = new Date().toISOString().slice(0, 10);
   reportDurationEl.value = bootstrapData.durations[0];
@@ -1563,6 +1645,12 @@ async function refreshArchiveAndReports(response) {
   if (response.recent_reports) {
     bootstrapData.recent_reports = response.recent_reports;
     renderRecentReports(response.recent_reports);
+    if (currentReport?.id) {
+      const refreshed = response.recent_reports.find((item) => item.id === currentReport.id)?.report;
+      if (refreshed) {
+        renderParentReportPreview(refreshed);
+      }
+    }
   }
 }
 
@@ -1600,13 +1688,12 @@ async function handleGeneratePlan(event) {
     planOutput.classList.remove("hidden");
     renderSummary(currentPlan);
     renderWeeklyPlan(currentPlan);
-    renderLessonDetail(currentPlan.weekly_plan_detailed?.[0]?.sessions?.[0]);
+    const firstLesson = currentPlan.weekly_plan_detailed?.[0]?.sessions?.[0];
+    renderLessonDetail(firstLesson);
     renderSessionTemplates(currentPlan);
     renderParentTemplate(currentPlan);
-    const defaultContent = currentPlan.session_templates[0]?.blocks.map((block) => `${block.phase}：${block.title}`).join("；") || "";
-    sessionContentEl.value = defaultContent;
-    reportDurationEl.value = String(currentPlan.plan_overview.session_duration_min);
-    homeworkEl.value = currentPlan.parent_report_template.homework;
+    coachNotesEl.value = "";
+    applyLessonToReportDraft(firstLesson);
     setStatus("已生成课件", "success");
   } catch (error) {
     setStatus(error.message, "error");
@@ -1736,12 +1823,39 @@ athleteList.addEventListener("click", (event) => {
 
 recentReports.addEventListener("click", (event) => {
   const deleteButton = event.target.closest("[data-delete-report-id]");
-  if (!deleteButton) return;
-  handleDeleteReport(deleteButton.dataset.deleteReportId);
+  if (deleteButton) {
+    handleDeleteReport(deleteButton.dataset.deleteReportId);
+    return;
+  }
+  const card = event.target.closest("[data-report-id]");
+  if (!card) return;
+  const selected = (bootstrapData?.recent_reports || []).find((item) => item.id === card.dataset.reportId);
+  if (selected?.report) {
+    renderParentReportPreview(selected.report);
+    renderRecentReports(bootstrapData.recent_reports || []);
+    setStatus(`已载入 ${selected.athlete_name} 的训练汇报`, "success");
+  }
 });
 
 athleteSearchEl?.addEventListener("input", () => {
   renderAthleteList(bootstrapData?.athlete_profiles || []);
+});
+
+reportSearchEl?.addEventListener("input", () => {
+  currentReportPage = 1;
+  renderRecentReports(bootstrapData?.recent_reports || []);
+});
+
+reportFilterEl?.addEventListener("change", () => {
+  currentReportPage = 1;
+  renderRecentReports(bootstrapData?.recent_reports || []);
+});
+
+reportPaginationEl?.addEventListener("click", (event) => {
+  const button = event.target.closest("[data-report-page]");
+  if (!button) return;
+  currentReportPage = Number(button.dataset.reportPage || 1);
+  renderRecentReports(bootstrapData?.recent_reports || []);
 });
 
 weeklyPlan.addEventListener("click", (event) => {
@@ -1753,6 +1867,8 @@ weeklyPlan.addEventListener("click", (event) => {
     .find((item) => item.id === selectedLessonId);
   renderWeeklyPlan(currentPlan);
   renderLessonDetail(lesson);
+  applyLessonToReportDraft(lesson);
+  setStatus(`已带入 ${lesson?.title || "当前课次"} 的训练内容`, "success");
 });
 
 document.addEventListener("click", (event) => {
@@ -1764,6 +1880,12 @@ document.addEventListener("click", (event) => {
   }
   if (event.target.id === "open-parent-share-btn") {
     openParentShareWindow(currentReport);
+  }
+  if (event.target.id === "refresh-parent-share-btn") {
+    openParentShareWindow(currentReport);
+  }
+  if (event.target.id === "export-parent-pdf-btn") {
+    openParentReportPdfWindow(currentReport);
   }
 });
 

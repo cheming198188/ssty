@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import hmac
 import json
 import mimetypes
 import os
@@ -41,9 +42,10 @@ ADMIN_USERNAME_ENV = "APP_ADMIN_USERNAME"
 ADMIN_PASSWORD_ENV = "APP_ADMIN_PASSWORD"
 COACH_USERNAME_ENV = "APP_COACH_USERNAME"
 COACH_PASSWORD_ENV = "APP_COACH_PASSWORD"
+STORE_NAME_ENV = "APP_STORE_NAME"
+SESSION_SECRET_ENV = "APP_SESSION_SECRET"
 SESSION_COOKIE_NAME = "mcs_session"
 SESSION_TTL_SECONDS = 60 * 60 * 12
-SESSION_STORE: dict[str, dict[str, Any]] = {}
 
 
 BOOTSTRAP_DATA = {
@@ -713,6 +715,16 @@ def supabase_enabled() -> bool:
     return bool(supabase_url() and supabase_service_key())
 
 
+def store_name() -> str:
+    return os.environ.get(STORE_NAME_ENV, "神兽体育").strip() or "神兽体育"
+
+
+def session_secret() -> str:
+    configured = "|".join(f"{user['username']}:{user['password']}" for user in configured_users())
+    fallback = f"{store_name()}::{configured}"
+    return os.environ.get(SESSION_SECRET_ENV, fallback).strip() or fallback
+
+
 def configured_users() -> list[dict[str, str]]:
     return [
         {
@@ -720,12 +732,14 @@ def configured_users() -> list[dict[str, str]]:
             "password": os.environ.get(ADMIN_PASSWORD_ENV, "admin123456").strip() or "admin123456",
             "role": "admin",
             "label": "管理员",
+            "store_name": store_name(),
         },
         {
             "username": os.environ.get(COACH_USERNAME_ENV, "coach").strip() or "coach",
             "password": os.environ.get(COACH_PASSWORD_ENV, "coach123456").strip() or "coach123456",
             "role": "coach",
             "label": "教练",
+            "store_name": store_name(),
         },
     ]
 
@@ -735,28 +749,44 @@ def role_label(role: str) -> str:
 
 
 def auth_identity_payload(user: dict[str, str]) -> dict[str, str]:
-    return {"username": user["username"], "role": user["role"], "role_label": role_label(user["role"])}
+    return {
+        "username": user["username"],
+        "role": user["role"],
+        "role_label": role_label(user["role"]),
+        "store_name": user.get("store_name", store_name()),
+    }
 
 
 def create_session(user: dict[str, str]) -> str:
-    token = secrets.token_urlsafe(32)
-    SESSION_STORE[token] = {
+    payload = {
         "username": user["username"],
         "role": user["role"],
-        "expires_at": time.time() + SESSION_TTL_SECONDS,
+        "store_name": user.get("store_name", store_name()),
+        "expires_at": int(time.time() + SESSION_TTL_SECONDS),
     }
-    return token
+    encoded_payload = base64.urlsafe_b64encode(json.dumps(payload, separators=(",", ":"), ensure_ascii=False).encode("utf-8")).decode("ascii").rstrip("=")
+    signature = hmac.new(session_secret().encode("utf-8"), encoded_payload.encode("utf-8"), digestmod="sha256").digest()
+    encoded_signature = base64.urlsafe_b64encode(signature).decode("ascii").rstrip("=")
+    return f"{encoded_payload}.{encoded_signature}"
 
 
 def session_from_token(token: str) -> dict[str, Any] | None:
-    session = SESSION_STORE.get(token)
-    if not session:
+    if "." not in token:
         return None
-    if session.get("expires_at", 0) < time.time():
-        SESSION_STORE.pop(token, None)
+    encoded_payload, encoded_signature = token.split(".", 1)
+    expected_signature = hmac.new(session_secret().encode("utf-8"), encoded_payload.encode("utf-8"), digestmod="sha256").digest()
+    expected_encoded = base64.urlsafe_b64encode(expected_signature).decode("ascii").rstrip("=")
+    if not hmac.compare_digest(expected_encoded, encoded_signature):
         return None
-    session["expires_at"] = time.time() + SESSION_TTL_SECONDS
-    return session
+    padding = "=" * (-len(encoded_payload) % 4)
+    try:
+        payload = json.loads(base64.urlsafe_b64decode(f"{encoded_payload}{padding}").decode("utf-8"))
+    except (ValueError, json.JSONDecodeError):
+        return None
+    if payload.get("expires_at", 0) < time.time():
+        return None
+    payload["expires_at"] = int(time.time() + SESSION_TTL_SECONDS)
+    return payload
 
 
 def parse_cookie_header(header: str | None) -> SimpleCookie[str]:
@@ -789,6 +819,29 @@ def session_cookie(token: str) -> str:
 
 def clear_session_cookie() -> str:
     return f"{SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
+
+
+def ownership_fields(identity: dict[str, Any] | None) -> dict[str, str]:
+    if not identity:
+        return {"owner_username": "", "owner_role": "", "store_name": store_name()}
+    return {
+        "owner_username": str(identity.get("username", "") or ""),
+        "owner_role": str(identity.get("role", "") or ""),
+        "store_name": str(identity.get("store_name", "") or store_name()),
+    }
+
+
+def is_visible_to_identity(record: dict[str, Any], identity: dict[str, Any] | None) -> bool:
+    if not identity:
+        return False
+    if identity.get("role") == "admin":
+        return True
+    owner_username = str(record.get("owner_username", "") or "")
+    record_store = str(record.get("store_name", "") or store_name())
+    identity_store = str(identity.get("store_name", "") or store_name())
+    if owner_username:
+        return owner_username == identity.get("username")
+    return record_store == identity_store
 
 
 def supabase_request(
@@ -900,6 +953,9 @@ def athlete_from_db_row(row: dict[str, Any]) -> dict[str, Any]:
         "assessment": row.get("assessment", raw.get("assessment", "")),
         "needs": row.get("needs", raw.get("needs", "")),
         "constraints": row.get("constraints", raw.get("constraints", "")),
+        "owner_username": raw.get("owner_username", ""),
+        "owner_role": raw.get("owner_role", ""),
+        "store_name": raw.get("store_name", store_name()),
         "created_at": row.get("created_at", raw.get("created_at", "")),
         "updated_at": row.get("updated_at", raw.get("updated_at", "")),
     }
@@ -929,6 +985,9 @@ def report_from_db_row(row: dict[str, Any]) -> dict[str, Any]:
         report.setdefault("id", row.get("id", ""))
         report.setdefault("created_at", row.get("created_at", ""))
         report.setdefault("parent_summary", row.get("parent_summary", ""))
+        report.setdefault("owner_username", "")
+        report.setdefault("owner_role", "")
+        report.setdefault("store_name", store_name())
     return report
 
 
@@ -1002,7 +1061,7 @@ def delete_athlete_profile_cloud(athlete_id: str) -> dict[str, Any]:
     return {"id": athlete_id}
 
 
-def list_athlete_profiles_cloud(limit: int = 10) -> list[dict[str, Any]]:
+def list_athlete_profiles_cloud(identity: dict[str, Any] | None, limit: int = 10) -> list[dict[str, Any]]:
     rows = supabase_request(
         "GET",
         "/rest/v1/athletes",
@@ -1011,6 +1070,8 @@ def list_athlete_profiles_cloud(limit: int = 10) -> list[dict[str, Any]]:
     profiles = []
     for row in rows or []:
         profile = athlete_from_db_row(row)
+        if not is_visible_to_identity(profile, identity):
+            continue
         profiles.append(
             {
                 "id": profile.get("id", ""),
@@ -1021,6 +1082,8 @@ def list_athlete_profiles_cloud(limit: int = 10) -> list[dict[str, Any]]:
                 "guardian_phone": profile.get("guardian_phone", ""),
                 "goal": profile.get("training_goal", ""),
                 "training_type": profile.get("training_type", ""),
+                "owner_username": profile.get("owner_username", ""),
+                "store_name": profile.get("store_name", store_name()),
                 "session_duration_min": profile.get("session_duration_min", 60),
                 "updated_at": profile.get("updated_at", ""),
                 "profile": profile,
@@ -1043,7 +1106,7 @@ def delete_report_cloud(report_id: str) -> dict[str, Any]:
     return report
 
 
-def recent_reports_cloud(limit: int = 6) -> list[dict[str, Any]]:
+def recent_reports_cloud(identity: dict[str, Any] | None, limit: int = 60) -> list[dict[str, Any]]:
     rows = supabase_request(
         "GET",
         "/rest/v1/reports",
@@ -1052,6 +1115,8 @@ def recent_reports_cloud(limit: int = 6) -> list[dict[str, Any]]:
     reports = []
     for row in rows or []:
         data = report_from_db_row(row)
+        if not is_visible_to_identity(data, identity):
+            continue
         reports.append(
             {
                 "id": data.get("id", ""),
@@ -1061,12 +1126,15 @@ def recent_reports_cloud(limit: int = 6) -> list[dict[str, Any]]:
                 "summary": data.get("parent_friendly", {}).get("headline", row.get("parent_summary", "")),
                 "media_count": len(data.get("media", [])),
                 "engagement": data.get("session", {}).get("engagement", row.get("engagement", "")),
+                "owner_username": data.get("owner_username", ""),
+                "store_name": data.get("store_name", store_name()),
+                "report": data,
             }
         )
     return reports
 
 
-def athlete_report_history_cloud(athlete: dict[str, Any], limit: int = 6) -> list[dict[str, Any]]:
+def athlete_report_history_cloud(athlete: dict[str, Any], identity: dict[str, Any] | None, limit: int = 6) -> list[dict[str, Any]]:
     athlete_id = athlete.get("id", "")
     athlete_name = athlete.get("name", "")
     query: dict[str, Any] = {"select": "*", "order": "created_at.desc", "limit": str(limit)}
@@ -1078,6 +1146,7 @@ def athlete_report_history_cloud(athlete: dict[str, Any], limit: int = 6) -> lis
         return []
     rows = supabase_request("GET", "/rest/v1/reports", query=query)
     history = [report_from_db_row(row) for row in rows or []]
+    history = [item for item in history if is_visible_to_identity(item, identity)]
     return list(reversed(history))
 
 
@@ -1668,13 +1737,17 @@ def athlete_profile_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
         "assessment": payload.get("assessment", "").strip(),
         "needs": payload.get("needs", "").strip(),
         "constraints": payload.get("constraints", "").strip(),
+        "owner_username": payload.get("owner_username", "").strip(),
+        "owner_role": payload.get("owner_role", "").strip(),
+        "store_name": payload.get("store_name", "").strip() or store_name(),
         "updated_at": now,
     }
 
 
-def save_athlete_profile(payload: dict[str, Any]) -> dict[str, Any]:
+def save_athlete_profile(payload: dict[str, Any], identity: dict[str, Any] | None = None) -> dict[str, Any]:
     ensure_dirs()
     profile = athlete_profile_from_payload(payload)
+    profile.update(ownership_fields(identity))
     if supabase_enabled():
         try:
             return save_athlete_profile_cloud(profile)
@@ -1715,19 +1788,21 @@ def delete_athlete_profile(athlete_id: str) -> dict[str, Any]:
     return profile
 
 
-def list_athlete_profiles(limit: int = 10) -> list[dict[str, Any]]:
+def list_athlete_profiles(identity: dict[str, Any] | None, limit: int = 10) -> list[dict[str, Any]]:
     ensure_dirs()
     if supabase_enabled():
         try:
-            return list_athlete_profiles_cloud(limit)
+            return list_athlete_profiles_cloud(identity, limit)
         except Exception as exc:
             print(f"Supabase athlete list failed, fallback to local storage: {exc}", file=sys.stderr)
     profiles = []
     files = sorted(ATHLETE_DIR.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
-    for path in files[:limit]:
+    for path in files:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
+            continue
+        if not is_visible_to_identity(data, identity):
             continue
         profiles.append(
             {
@@ -1739,11 +1814,15 @@ def list_athlete_profiles(limit: int = 10) -> list[dict[str, Any]]:
                 "guardian_phone": data.get("guardian_phone", ""),
                 "goal": data.get("training_goal", ""),
                 "training_type": data.get("training_type", ""),
+                "owner_username": data.get("owner_username", ""),
+                "store_name": data.get("store_name", store_name()),
                 "session_duration_min": data.get("session_duration_min", 60),
                 "updated_at": data.get("updated_at", ""),
                 "profile": data,
             }
         )
+        if len(profiles) >= limit:
+            break
     return profiles
 
 
@@ -1819,19 +1898,21 @@ def build_plan(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def recent_reports(limit: int = 6) -> list[dict[str, Any]]:
+def recent_reports(identity: dict[str, Any] | None, limit: int = 60) -> list[dict[str, Any]]:
     ensure_dirs()
     if supabase_enabled():
         try:
-            return recent_reports_cloud(limit)
+            return recent_reports_cloud(identity, limit)
         except Exception as exc:
             print(f"Supabase recent reports failed, fallback to local storage: {exc}", file=sys.stderr)
     files = sorted(REPORT_DIR.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
     reports = []
-    for path in files[:limit]:
+    for path in files:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError:
+            continue
+        if not is_visible_to_identity(data, identity):
             continue
         reports.append(
             {
@@ -1842,8 +1923,13 @@ def recent_reports(limit: int = 6) -> list[dict[str, Any]]:
                 "summary": data.get("parent_friendly", {}).get("headline", ""),
                 "media_count": len(data.get("media", [])),
                 "engagement": data.get("session", {}).get("engagement", ""),
+                "owner_username": data.get("owner_username", ""),
+                "store_name": data.get("store_name", store_name()),
+                "report": data,
             }
         )
+        if len(reports) >= limit:
+            break
     return reports
 
 
@@ -1868,11 +1954,11 @@ def delete_report(report_id: str) -> dict[str, Any]:
     raise ValueError("未找到对应的训练报告")
 
 
-def athlete_report_history(athlete: dict[str, Any], limit: int = 6) -> list[dict[str, Any]]:
+def athlete_report_history(athlete: dict[str, Any], identity: dict[str, Any] | None, limit: int = 6) -> list[dict[str, Any]]:
     ensure_dirs()
     if supabase_enabled():
         try:
-            return athlete_report_history_cloud(athlete, limit)
+            return athlete_report_history_cloud(athlete, identity, limit)
         except Exception as exc:
             print(f"Supabase athlete history failed, fallback to local storage: {exc}", file=sys.stderr)
     athlete_id = athlete.get("id", "")
@@ -1891,7 +1977,7 @@ def athlete_report_history(athlete: dict[str, Any], limit: int = 6) -> list[dict
             or athlete_name
             and report_athlete.get("name") == athlete_name
         )
-        if not same_athlete:
+        if not same_athlete or not is_visible_to_identity(data, identity):
             continue
         history.append(data)
         if len(history) >= limit:
@@ -2038,7 +2124,7 @@ def build_parent_friendly_report(athlete: dict[str, Any], session: dict[str, Any
     }
 
 
-def save_report(payload: dict[str, Any]) -> dict[str, Any]:
+def save_report(payload: dict[str, Any], identity: dict[str, Any] | None = None) -> dict[str, Any]:
     ensure_dirs()
     athlete = payload.get("athlete", {})
     session = payload.get("session", {})
@@ -2046,7 +2132,10 @@ def save_report(payload: dict[str, Any]) -> dict[str, Any]:
     athlete_name = athlete.get("name", "未命名学员")
     media_items = payload.get("media", [])
     saved_media = [decode_data_url(item, athlete_name, index) for index, item in enumerate(media_items, start=1)]
-    history = athlete_report_history(athlete)
+    owner = ownership_fields(identity)
+    athlete.setdefault("owner_username", owner["owner_username"])
+    athlete.setdefault("store_name", owner["store_name"])
+    history = athlete_report_history(athlete, identity)
     parent_friendly = build_parent_friendly_report(athlete, session, saved_media, history, plan)
     summary = (
         f"{athlete_name} 于 {session.get('date', '今日')} 完成 {session.get('duration', '60分钟')} 训练，"
@@ -2059,6 +2148,9 @@ def save_report(payload: dict[str, Any]) -> dict[str, Any]:
         "plan": plan,
         "session": session,
         "media": saved_media,
+        "owner_username": owner["owner_username"],
+        "owner_role": owner["owner_role"],
+        "store_name": owner["store_name"],
         "parent_summary": summary + (session.get("coach_notes", "") or ""),
         "parent_friendly": parent_friendly,
     }
@@ -2272,7 +2364,25 @@ def index_html() -> bytes:
           <h2>最近训练汇报</h2>
         </div>
       </div>
+      <div class="report-toolbar">
+        <label class="field report-toolbar-field">
+          <span>搜索报告</span>
+          <input id="report-search" type="text" placeholder="输入学员姓名、训练目标或日期" />
+        </label>
+        <label class="field report-toolbar-field">
+          <span>筛选条件</span>
+          <select id="report-filter">
+            <option value="all">全部报告</option>
+            <option value="media">仅看有素材</option>
+            <option value="优秀">投入度：优秀</option>
+            <option value="良好">投入度：良好</option>
+            <option value="一般">投入度：一般</option>
+            <option value="需激励">投入度：需激励</option>
+          </select>
+        </label>
+      </div>
       <div id="recent-reports" class="recent-reports"></div>
+      <div id="report-pagination" class="report-pagination"></div>
     </section>
   </main>
 
@@ -2392,7 +2502,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 {
                     "authenticated": bool(identity),
                     "user": auth_identity_payload(identity) if identity else None,
-                }
+                },
+                extra_headers={"Set-Cookie": session_cookie(create_session(identity))} if identity else None,
             )
             return
 
@@ -2403,10 +2514,11 @@ class AppHandler(BaseHTTPRequestHandler):
             self.respond_json(
                 {
                     **BOOTSTRAP_DATA,
-                    "recent_reports": recent_reports(),
-                    "athlete_profiles": list_athlete_profiles(),
+                    "recent_reports": recent_reports(identity),
+                    "athlete_profiles": list_athlete_profiles(identity),
                     "auth": {"authenticated": True, "user": auth_identity_payload(identity)},
-                }
+                },
+                extra_headers={"Set-Cookie": session_cookie(create_session(identity))},
             )
             return
 
@@ -2453,10 +2565,6 @@ class AppHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/logout":
-            cookie = parse_cookie_header(self.headers.get("Cookie"))
-            token = cookie.get(SESSION_COOKIE_NAME)
-            if token:
-                SESSION_STORE.pop(token.value, None)
             self.respond_json({"message": "已退出登录"}, extra_headers={"Set-Cookie": clear_session_cookie()})
             return
 
@@ -2465,8 +2573,8 @@ class AppHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/save-athlete-profile":
-            profile = save_athlete_profile(payload)
-            self.respond_json({"message": "学员档案已保存", "profile": profile, "athlete_profiles": list_athlete_profiles()})
+            profile = save_athlete_profile(payload, identity)
+            self.respond_json({"message": "学员档案已保存", "profile": profile, "athlete_profiles": list_athlete_profiles(identity)})
             return
 
         if parsed.path == "/api/delete-athlete-profile":
@@ -2485,8 +2593,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 {
                     "message": f"{profile.get('name', '该学员')} 档案已删除",
                     "deleted_id": athlete_id,
-                    "athlete_profiles": list_athlete_profiles(),
-                    "recent_reports": recent_reports(),
+                    "athlete_profiles": list_athlete_profiles(identity),
+                    "recent_reports": recent_reports(identity),
                 }
             )
             return
@@ -2497,7 +2605,7 @@ class AppHandler(BaseHTTPRequestHandler):
 
         if parsed.path == "/api/save-session-report":
             try:
-                report = save_report(payload)
+                report = save_report(payload, identity)
             except ValueError as exc:
                 self.respond_json({"error": str(exc)}, status=400)
                 return
@@ -2505,8 +2613,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 {
                     "message": "训练报告已保存",
                     "report": report,
-                    "recent_reports": recent_reports(),
-                    "athlete_profiles": list_athlete_profiles(),
+                    "recent_reports": recent_reports(identity),
+                    "athlete_profiles": list_athlete_profiles(identity),
                 }
             )
             return
@@ -2527,8 +2635,8 @@ class AppHandler(BaseHTTPRequestHandler):
                 {
                     "message": f"{report.get('athlete', {}).get('name', '该学员')} 的训练报告已删除",
                     "deleted_id": report_id,
-                    "recent_reports": recent_reports(),
-                    "athlete_profiles": list_athlete_profiles(),
+                    "recent_reports": recent_reports(identity),
+                    "athlete_profiles": list_athlete_profiles(identity),
                 }
             )
             return
