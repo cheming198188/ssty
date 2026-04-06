@@ -60,6 +60,10 @@ let currentAthleteId = "";
 let selectedLessonId = "";
 let currentReport = null;
 
+function formatUpdatedAt(value) {
+  return value ? String(value).replace("T", " ") : "刚刚";
+}
+
 function escapeHtml(value) {
   return String(value ?? "")
     .replaceAll("&", "&amp;")
@@ -262,14 +266,17 @@ function renderAthleteList(items = []) {
   athleteList.innerHTML = visibleItems
     .map(
       (item) => `
-        <button class="athlete-card ${item.id === currentAthleteId ? "active" : ""}" type="button" data-id="${item.id}">
-          <div class="athlete-card-top">
-            <strong>${item.name}</strong>
-            <span>${item.trainee_group || "青少年"} · ${item.age} 岁 · ${item.gender}</span>
-          </div>
-          <p>${item.goal || "目标待补充"} · ${item.training_type || "课程类型待补充"}</p>
-          <small>家长 ${item.guardian_phone || "未填写"} · ${item.session_duration_min || 60} 分钟课 · 更新于 ${item.updated_at?.replace("T", " ") || "刚刚"}</small>
-        </button>
+        <article class="athlete-card-shell ${item.id === currentAthleteId ? "active" : ""}">
+          <button class="athlete-card select-athlete ${item.id === currentAthleteId ? "active" : ""}" type="button" data-id="${item.id}">
+            <div class="athlete-card-top">
+              <strong>${item.name}</strong>
+              <span>${item.trainee_group || "青少年"} · ${item.age} 岁 · ${item.gender}</span>
+            </div>
+            <p>${item.goal || "目标待补充"} · ${item.training_type || "课程类型待补充"}</p>
+            <small>家长 ${item.guardian_phone || "未填写"} · ${item.session_duration_min || 60} 分钟课 · 更新于 ${formatUpdatedAt(item.updated_at)}</small>
+          </button>
+          <button class="card-delete-btn" type="button" data-delete-athlete-id="${item.id}" aria-label="删除 ${item.name} 档案">删除</button>
+        </article>
       `,
     )
     .join("");
@@ -885,8 +892,11 @@ function renderRecentReports(items = []) {
       (item) => `
         <article class="recent-card">
           <div class="recent-top">
-            <strong>${item.athlete_name}</strong>
-            <span>${item.date || "待补充日期"}</span>
+            <div>
+              <strong>${item.athlete_name}</strong>
+              <span>${item.date || "待补充日期"}</span>
+            </div>
+            <button class="card-delete-btn" type="button" data-delete-report-id="${item.id}" aria-label="删除 ${item.athlete_name} 的训练报告">删除</button>
           </div>
           <p>${item.goal || "训练目标待补充"}</p>
           <small>${item.summary || "本次已记录训练表现。"} · 投入度 ${item.engagement || "良好"} · 素材 ${item.media_count || 0} 个</small>
@@ -1549,14 +1559,77 @@ async function handleSaveReport(event) {
   }
 }
 
+async function handleDeleteAthlete(athleteId) {
+  const item = (bootstrapData?.athlete_profiles || []).find((entry) => entry.id === athleteId);
+  const athleteName = item?.name || "该学员";
+  if (!window.confirm(`确认删除“${athleteName}”档案吗？关联训练报告和媒体也会一起删除。`)) return;
+
+  try {
+    const response = await requestJson("/api/delete-athlete-profile", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: athleteId }),
+    });
+    await refreshArchiveAndReports(response);
+    if (currentAthleteId === athleteId) {
+      currentAthleteId = "";
+      currentPlan = null;
+      currentReport = null;
+      selectedLessonId = "";
+      emptyState.classList.remove("hidden");
+      planOutput.classList.add("hidden");
+      renderLessonDetail(null);
+      renderParentReportPreview(null);
+      startNewAthlete();
+    }
+    setStatus(response.message || "学员档案已删除", "success");
+  } catch (error) {
+    setStatus(error.message, "error");
+  }
+}
+
+async function handleDeleteReport(reportId) {
+  const item = (bootstrapData?.recent_reports || []).find((entry) => entry.id === reportId);
+  const athleteName = item?.athlete_name || "该学员";
+  if (!window.confirm(`确认删除“${athleteName}”的这份训练报告吗？关联媒体也会一起删除。`)) return;
+
+  try {
+    const response = await requestJson("/api/delete-session-report", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ id: reportId }),
+    });
+    await refreshArchiveAndReports(response);
+    if (currentReport?.id === reportId) {
+      currentReport = null;
+      renderParentReportPreview(null);
+    }
+    setStatus(response.message || "训练报告已删除", "success");
+  } catch (error) {
+    setStatus(error.message, "error");
+  }
+}
+
 athleteList.addEventListener("click", (event) => {
-  const button = event.target.closest(".athlete-card");
+  const deleteButton = event.target.closest("[data-delete-athlete-id]");
+  if (deleteButton) {
+    handleDeleteAthlete(deleteButton.dataset.deleteAthleteId);
+    return;
+  }
+
+  const button = event.target.closest(".select-athlete");
   if (!button) return;
   const profile = (bootstrapData.athlete_profiles || []).find((item) => item.id === button.dataset.id)?.profile;
   if (!profile) return;
   applyProfile(profile);
   renderAthleteList(bootstrapData.athlete_profiles || []);
   setStatus(`已载入 ${profile.name} 档案`, "success");
+});
+
+recentReports.addEventListener("click", (event) => {
+  const deleteButton = event.target.closest("[data-delete-report-id]");
+  if (!deleteButton) return;
+  handleDeleteReport(deleteButton.dataset.deleteReportId);
 });
 
 athleteSearchEl?.addEventListener("input", () => {

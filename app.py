@@ -845,6 +845,41 @@ def report_from_db_row(row: dict[str, Any]) -> dict[str, Any]:
     return report
 
 
+def supabase_delete_storage_objects(paths: list[str]) -> None:
+    unique_paths = [path for path in dict.fromkeys(paths) if path]
+    if not unique_paths:
+        return
+    for path in unique_paths:
+        supabase_request(
+            "DELETE",
+            f"/storage/v1/object/{quote(supabase_storage_bucket(), safe='')}/{quote(path, safe='/')}",
+        )
+
+
+def supabase_storage_path_from_url(url: str) -> str:
+    prefix = f"{supabase_url()}/storage/v1/object/public/{supabase_storage_bucket()}/"
+    if url.startswith(prefix):
+        return unquote(url.removeprefix(prefix))
+    return ""
+
+
+def delete_media_items(media_items: list[dict[str, Any]]) -> None:
+    cloud_paths: list[str] = []
+    for item in media_items:
+        url = item.get("url", "")
+        cloud_path = supabase_storage_path_from_url(url) if supabase_enabled() else ""
+        if cloud_path:
+            cloud_paths.append(cloud_path)
+            continue
+        if url.startswith("/media/"):
+            filename = unquote(url.removeprefix("/media/"))
+            target = MEDIA_DIR / filename
+            if target.exists():
+                target.unlink()
+    if supabase_enabled() and cloud_paths:
+        supabase_delete_storage_objects(cloud_paths)
+
+
 def save_athlete_profile_cloud(profile: dict[str, Any]) -> dict[str, Any]:
     saved = supabase_request(
         "POST",
@@ -856,6 +891,28 @@ def save_athlete_profile_cloud(profile: dict[str, Any]) -> dict[str, Any]:
     if isinstance(saved, list) and saved:
         return athlete_from_db_row(saved[0])
     return profile
+
+
+def delete_athlete_profile_cloud(athlete_id: str) -> dict[str, Any]:
+    athlete_rows = supabase_request(
+        "GET",
+        "/rest/v1/athletes",
+        query={"select": "*", "id": f"eq.{athlete_id}", "limit": "1"},
+    )
+    athlete_row = athlete_rows[0] if athlete_rows else None
+    report_rows = supabase_request(
+        "GET",
+        "/rest/v1/reports",
+        query={"select": "*", "athlete_id": f"eq.{athlete_id}", "limit": "1000"},
+    )
+    reports = [report_from_db_row(row) for row in report_rows or []]
+    for report in reports:
+        delete_media_items(report.get("media", []))
+    supabase_request("DELETE", "/rest/v1/reports", query={"athlete_id": f"eq.{athlete_id}"}, extra_headers={"Prefer": "return=minimal"})
+    supabase_request("DELETE", "/rest/v1/athletes", query={"id": f"eq.{athlete_id}"}, extra_headers={"Prefer": "return=minimal"})
+    if athlete_row:
+        return athlete_from_db_row(athlete_row)
+    return {"id": athlete_id}
 
 
 def list_athlete_profiles_cloud(limit: int = 10) -> list[dict[str, Any]]:
@@ -883,6 +940,20 @@ def list_athlete_profiles_cloud(limit: int = 10) -> list[dict[str, Any]]:
             }
         )
     return profiles
+
+
+def delete_report_cloud(report_id: str) -> dict[str, Any]:
+    rows = supabase_request(
+        "GET",
+        "/rest/v1/reports",
+        query={"select": "*", "id": f"eq.{report_id}", "limit": "1"},
+    )
+    if not rows:
+        raise ValueError("未找到对应的训练报告")
+    report = report_from_db_row(rows[0])
+    delete_media_items(report.get("media", []))
+    supabase_request("DELETE", "/rest/v1/reports", query={"id": f"eq.{report_id}"}, extra_headers={"Prefer": "return=minimal"})
+    return report
 
 
 def recent_reports_cloud(limit: int = 6) -> list[dict[str, Any]]:
@@ -1527,6 +1598,36 @@ def save_athlete_profile(payload: dict[str, Any]) -> dict[str, Any]:
     return profile
 
 
+def delete_athlete_profile(athlete_id: str) -> dict[str, Any]:
+    ensure_dirs()
+    if supabase_enabled():
+        try:
+            return delete_athlete_profile_cloud(athlete_id)
+        except Exception as exc:
+            print(f"Supabase athlete delete failed, fallback to local storage: {exc}", file=sys.stderr)
+    path = ATHLETE_DIR / f"{athlete_id}.json"
+    profile: dict[str, Any] = {"id": athlete_id}
+    if path.exists():
+        try:
+            profile = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            profile = {"id": athlete_id}
+        path.unlink()
+
+    files = sorted(REPORT_DIR.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+    for report_path in files:
+        try:
+            report = json.loads(report_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        report_athlete = report.get("athlete", {})
+        if report_athlete.get("id") != athlete_id:
+            continue
+        delete_media_items(report.get("media", []))
+        report_path.unlink()
+    return profile
+
+
 def list_athlete_profiles(limit: int = 10) -> list[dict[str, Any]]:
     ensure_dirs()
     if supabase_enabled():
@@ -1657,6 +1758,27 @@ def recent_reports(limit: int = 6) -> list[dict[str, Any]]:
             }
         )
     return reports
+
+
+def delete_report(report_id: str) -> dict[str, Any]:
+    ensure_dirs()
+    if supabase_enabled():
+        try:
+            return delete_report_cloud(report_id)
+        except Exception as exc:
+            print(f"Supabase report delete failed, fallback to local storage: {exc}", file=sys.stderr)
+    files = sorted(REPORT_DIR.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
+    for path in files:
+        try:
+            report = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            continue
+        if report.get("id") != report_id:
+            continue
+        delete_media_items(report.get("media", []))
+        path.unlink()
+        return report
+    raise ValueError("未找到对应的训练报告")
 
 
 def athlete_report_history(athlete: dict[str, Any], limit: int = 6) -> list[dict[str, Any]]:
@@ -2160,6 +2282,26 @@ class AppHandler(BaseHTTPRequestHandler):
             self.respond_json({"message": "学员档案已保存", "profile": profile, "athlete_profiles": list_athlete_profiles()})
             return
 
+        if parsed.path == "/api/delete-athlete-profile":
+            athlete_id = str(payload.get("id", "")).strip()
+            if not athlete_id:
+                self.respond_json({"error": "缺少学员 ID"}, status=400)
+                return
+            try:
+                profile = delete_athlete_profile(athlete_id)
+            except ValueError as exc:
+                self.respond_json({"error": str(exc)}, status=404)
+                return
+            self.respond_json(
+                {
+                    "message": f"{profile.get('name', '该学员')} 档案已删除",
+                    "deleted_id": athlete_id,
+                    "athlete_profiles": list_athlete_profiles(),
+                    "recent_reports": recent_reports(),
+                }
+            )
+            return
+
         if parsed.path == "/api/generate-plan":
             self.respond_json(build_plan(payload))
             return
@@ -2174,6 +2316,26 @@ class AppHandler(BaseHTTPRequestHandler):
                 {
                     "message": "训练报告已保存",
                     "report": report,
+                    "recent_reports": recent_reports(),
+                    "athlete_profiles": list_athlete_profiles(),
+                }
+            )
+            return
+
+        if parsed.path == "/api/delete-session-report":
+            report_id = str(payload.get("id", "")).strip()
+            if not report_id:
+                self.respond_json({"error": "缺少报告 ID"}, status=400)
+                return
+            try:
+                report = delete_report(report_id)
+            except ValueError as exc:
+                self.respond_json({"error": str(exc)}, status=404)
+                return
+            self.respond_json(
+                {
+                    "message": f"{report.get('athlete', {}).get('name', '该学员')} 的训练报告已删除",
+                    "deleted_id": report_id,
                     "recent_reports": recent_reports(),
                     "athlete_profiles": list_athlete_profiles(),
                 }

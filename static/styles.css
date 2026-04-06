@@ -550,6 +550,10 @@ textarea::placeholder {
   gap: 14px;
 }
 
+.athlete-card-shell {
+  position: relative;
+}
+
 .athlete-card,
 .summary-card,
 .summary-wide,
@@ -575,11 +579,41 @@ textarea::placeholder {
     rgba(255, 252, 249, 0.98);
 }
 
+.athlete-card-shell.active .athlete-card,
 .athlete-card.active {
   border-color: rgba(239, 106, 46, 0.32);
   background:
     linear-gradient(160deg, rgba(239, 106, 46, 0.12), transparent 44%),
     rgba(255, 251, 246, 0.99);
+}
+
+.card-delete-btn {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  z-index: 2;
+  min-width: 56px;
+  height: 32px;
+  padding: 0 10px;
+  border-radius: 999px;
+  border: 1px solid rgba(184, 79, 34, 0.16);
+  background: rgba(255, 244, 236, 0.96);
+  color: #b84f22;
+  font-size: 12px;
+  font-weight: 700;
+  cursor: pointer;
+  transition: background 160ms ease, border-color 160ms ease, transform 160ms ease;
+}
+
+.card-delete-btn:hover {
+  transform: translateY(-1px);
+  background: rgba(255, 235, 223, 0.98);
+  border-color: rgba(184, 79, 34, 0.28);
+}
+
+.recent-top > div {
+  display: grid;
+  gap: 4px;
 }
 
 .athlete-card p,
