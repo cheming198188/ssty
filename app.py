@@ -930,7 +930,8 @@ def upload_media_to_supabase(item: dict[str, Any], athlete_name: str, index: int
         raise ValueError("媒体数据格式不正确")
     mime_type, encoded = match.groups()
     extension = mimetypes.guess_extension(mime_type) or (".bin" if "/" not in mime_type else f".{mime_type.split('/')[-1]}")
-    filename = f"{sanitize_filename(athlete_name)}/{datetime.now().strftime('%Y%m%d-%H%M%S')}-{index}-{uuid.uuid4().hex[:8]}{extension}"
+    athlete_slug = re.sub(r"[^a-zA-Z0-9_-]+", "-", athlete_name).strip("-") or "athlete"
+    filename = f"{athlete_slug}/{datetime.now().strftime('%Y%m%d-%H%M%S')}-{index}-{uuid.uuid4().hex[:8]}{extension}"
     binary = base64.b64decode(encoded)
     supabase_request(
         "POST",
