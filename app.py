@@ -15,7 +15,9 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote, unquote, urlparse
+from urllib.error import HTTPError, URLError
+from urllib.parse import quote, unquote, urlencode, urlparse
+from urllib.request import Request, urlopen
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -29,6 +31,10 @@ RELOAD_ENV = "FIT_APP_RELOAD_CHILD"
 HOST_ENV = "HOST"
 PORT_ENV = "PORT"
 ENABLE_RELOAD_ENV = "ENABLE_RELOAD"
+SUPABASE_URL_ENV = "SUPABASE_URL"
+SUPABASE_SERVICE_ROLE_KEY_ENV = "SUPABASE_SERVICE_ROLE_KEY"
+SUPABASE_STORAGE_BUCKET_ENV = "SUPABASE_STORAGE_BUCKET"
+DEFAULT_STORAGE_BUCKET = "training-media"
 
 
 BOOTSTRAP_DATA = {
@@ -682,6 +688,265 @@ def sanitize_filename(text: str) -> str:
     return value or "record"
 
 
+def supabase_url() -> str:
+    return os.environ.get(SUPABASE_URL_ENV, "").rstrip("/")
+
+
+def supabase_service_key() -> str:
+    return os.environ.get(SUPABASE_SERVICE_ROLE_KEY_ENV, "")
+
+
+def supabase_storage_bucket() -> str:
+    return os.environ.get(SUPABASE_STORAGE_BUCKET_ENV, DEFAULT_STORAGE_BUCKET)
+
+
+def supabase_enabled() -> bool:
+    return bool(supabase_url() and supabase_service_key())
+
+
+def supabase_request(
+    method: str,
+    path: str,
+    *,
+    query: dict[str, Any] | None = None,
+    json_body: dict[str, Any] | list[dict[str, Any]] | None = None,
+    data: bytes | None = None,
+    extra_headers: dict[str, str] | None = None,
+) -> Any:
+    if not supabase_enabled():
+        raise RuntimeError("Supabase 环境变量未配置")
+    url = f"{supabase_url()}{path}"
+    if query:
+        cleaned = {key: value for key, value in query.items() if value is not None}
+        url = f"{url}?{urlencode(cleaned)}"
+
+    headers = {
+        "apikey": supabase_service_key(),
+        "Authorization": f"Bearer {supabase_service_key()}",
+    }
+    if extra_headers:
+        headers.update(extra_headers)
+
+    payload: bytes | None = data
+    if json_body is not None:
+        payload = json.dumps(json_body, ensure_ascii=False).encode("utf-8")
+        headers["Content-Type"] = "application/json"
+
+    request = Request(url, data=payload, headers=headers, method=method.upper())
+    try:
+        with urlopen(request, timeout=30) as response:
+            body = response.read()
+            content_type = response.headers.get("Content-Type", "")
+    except HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="ignore")
+        raise RuntimeError(f"Supabase 请求失败: {exc.code} {detail}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"Supabase 连接失败: {exc.reason}") from exc
+
+    if not body:
+        return None
+    if "application/json" in content_type:
+        return json.loads(body.decode("utf-8"))
+    return body
+
+
+def athlete_to_db_row(profile: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "id": profile["id"],
+        "created_at": profile.get("created_at"),
+        "updated_at": profile.get("updated_at"),
+        "name": profile.get("name", "未命名学员"),
+        "age": profile.get("age"),
+        "trainee_group": profile.get("trainee_group"),
+        "gender": profile.get("gender"),
+        "height": profile.get("height"),
+        "weight": profile.get("weight"),
+        "school": profile.get("school"),
+        "grade": profile.get("grade"),
+        "guardian_name": profile.get("guardian_name"),
+        "guardian_phone": profile.get("guardian_phone"),
+        "training_goal": profile.get("training_goal"),
+        "cycle_weeks": profile.get("cycle_weeks"),
+        "sessions_per_week": profile.get("sessions_per_week"),
+        "session_duration_min": profile.get("session_duration_min"),
+        "training_type": profile.get("training_type"),
+        "assessment": profile.get("assessment"),
+        "needs": profile.get("needs"),
+        "constraints": profile.get("constraints"),
+        "training_experience": profile.get("training_experience"),
+        "sports_preferences": profile.get("sport_preference", ""),
+        "available_schedule": profile.get("available_schedule"),
+        "baseline_metrics": profile.get("baseline_metrics"),
+        "medical_history": profile.get("medical_history"),
+        "injury_history": profile.get("injury_history"),
+        "personality_notes": profile.get("personality_notes"),
+        "raw": profile,
+    }
+
+
+def athlete_from_db_row(row: dict[str, Any]) -> dict[str, Any]:
+    raw = row.get("raw") or {}
+    profile = {
+        "id": row.get("id", raw.get("id", "")),
+        "name": row.get("name", raw.get("name", "未命名学员")),
+        "age": row.get("age", raw.get("age", "")),
+        "trainee_group": row.get("trainee_group", raw.get("trainee_group", "青少年")),
+        "gender": row.get("gender", raw.get("gender", "")),
+        "height": row.get("height", raw.get("height", "")),
+        "weight": row.get("weight", raw.get("weight", "")),
+        "school": row.get("school", raw.get("school", "")),
+        "grade": row.get("grade", raw.get("grade", "")),
+        "guardian_name": row.get("guardian_name", raw.get("guardian_name", "")),
+        "guardian_phone": row.get("guardian_phone", raw.get("guardian_phone", "")),
+        "training_experience": row.get("training_experience", raw.get("training_experience", "")),
+        "sport_preference": row.get("sports_preferences", raw.get("sport_preference", "")),
+        "available_schedule": row.get("available_schedule", raw.get("available_schedule", "")),
+        "medical_history": row.get("medical_history", raw.get("medical_history", "")),
+        "injury_history": row.get("injury_history", raw.get("injury_history", "")),
+        "baseline_metrics": row.get("baseline_metrics", raw.get("baseline_metrics", "")),
+        "personality_notes": row.get("personality_notes", raw.get("personality_notes", "")),
+        "training_type": row.get("training_type", raw.get("training_type", "")),
+        "training_goal": row.get("training_goal", raw.get("training_goal", "")),
+        "cycle_weeks": row.get("cycle_weeks", raw.get("cycle_weeks", 8)),
+        "sessions_per_week": row.get("sessions_per_week", raw.get("sessions_per_week", 2)),
+        "session_duration_min": row.get("session_duration_min", raw.get("session_duration_min", 60)),
+        "assessment": row.get("assessment", raw.get("assessment", "")),
+        "needs": row.get("needs", raw.get("needs", "")),
+        "constraints": row.get("constraints", raw.get("constraints", "")),
+        "created_at": row.get("created_at", raw.get("created_at", "")),
+        "updated_at": row.get("updated_at", raw.get("updated_at", "")),
+    }
+    return profile
+
+
+def report_to_db_row(report: dict[str, Any]) -> dict[str, Any]:
+    athlete = report.get("athlete", {})
+    session = report.get("session", {})
+    plan_athlete = report.get("plan", {}).get("athlete", {})
+    return {
+        "id": report["id"],
+        "created_at": report.get("created_at"),
+        "athlete_id": athlete.get("id", ""),
+        "athlete_name": athlete.get("name", ""),
+        "session_date": session.get("date", ""),
+        "goal": plan_athlete.get("goal", athlete.get("goal", athlete.get("training_goal", ""))),
+        "engagement": session.get("engagement", ""),
+        "parent_summary": report.get("parent_summary", ""),
+        "report": report,
+    }
+
+
+def report_from_db_row(row: dict[str, Any]) -> dict[str, Any]:
+    report = row.get("report") or {}
+    if isinstance(report, dict):
+        report.setdefault("id", row.get("id", ""))
+        report.setdefault("created_at", row.get("created_at", ""))
+        report.setdefault("parent_summary", row.get("parent_summary", ""))
+    return report
+
+
+def save_athlete_profile_cloud(profile: dict[str, Any]) -> dict[str, Any]:
+    saved = supabase_request(
+        "POST",
+        "/rest/v1/athletes",
+        query={"on_conflict": "id"},
+        json_body=athlete_to_db_row(profile),
+        extra_headers={"Prefer": "resolution=merge-duplicates,return=representation"},
+    )
+    if isinstance(saved, list) and saved:
+        return athlete_from_db_row(saved[0])
+    return profile
+
+
+def list_athlete_profiles_cloud(limit: int = 10) -> list[dict[str, Any]]:
+    rows = supabase_request(
+        "GET",
+        "/rest/v1/athletes",
+        query={"select": "*", "order": "updated_at.desc", "limit": str(limit)},
+    )
+    profiles = []
+    for row in rows or []:
+        profile = athlete_from_db_row(row)
+        profiles.append(
+            {
+                "id": profile.get("id", ""),
+                "name": profile.get("name", "未命名学员"),
+                "age": profile.get("age", ""),
+                "trainee_group": profile.get("trainee_group", "青少年"),
+                "gender": profile.get("gender", ""),
+                "guardian_phone": profile.get("guardian_phone", ""),
+                "goal": profile.get("training_goal", ""),
+                "training_type": profile.get("training_type", ""),
+                "session_duration_min": profile.get("session_duration_min", 60),
+                "updated_at": profile.get("updated_at", ""),
+                "profile": profile,
+            }
+        )
+    return profiles
+
+
+def recent_reports_cloud(limit: int = 6) -> list[dict[str, Any]]:
+    rows = supabase_request(
+        "GET",
+        "/rest/v1/reports",
+        query={"select": "*", "order": "created_at.desc", "limit": str(limit)},
+    )
+    reports = []
+    for row in rows or []:
+        data = report_from_db_row(row)
+        reports.append(
+            {
+                "id": data.get("id", ""),
+                "athlete_name": data.get("athlete", {}).get("name", row.get("athlete_name", "未命名学员")),
+                "goal": data.get("plan", {}).get("athlete", {}).get("goal", row.get("goal", "")),
+                "date": data.get("session", {}).get("date", row.get("session_date", "")),
+                "summary": data.get("parent_friendly", {}).get("headline", row.get("parent_summary", "")),
+                "media_count": len(data.get("media", [])),
+                "engagement": data.get("session", {}).get("engagement", row.get("engagement", "")),
+            }
+        )
+    return reports
+
+
+def athlete_report_history_cloud(athlete: dict[str, Any], limit: int = 6) -> list[dict[str, Any]]:
+    athlete_id = athlete.get("id", "")
+    athlete_name = athlete.get("name", "")
+    query: dict[str, Any] = {"select": "*", "order": "created_at.desc", "limit": str(limit)}
+    if athlete_id:
+        query["athlete_id"] = f"eq.{athlete_id}"
+    elif athlete_name:
+        query["athlete_name"] = f"eq.{athlete_name}"
+    else:
+        return []
+    rows = supabase_request("GET", "/rest/v1/reports", query=query)
+    history = [report_from_db_row(row) for row in rows or []]
+    return list(reversed(history))
+
+
+def upload_media_to_supabase(item: dict[str, Any], athlete_name: str, index: int) -> dict[str, Any]:
+    raw = item.get("data_url", "")
+    match = re.match(r"data:(.*?);base64,(.*)", raw)
+    if not match:
+        raise ValueError("媒体数据格式不正确")
+    mime_type, encoded = match.groups()
+    extension = mimetypes.guess_extension(mime_type) or (".bin" if "/" not in mime_type else f".{mime_type.split('/')[-1]}")
+    filename = f"{sanitize_filename(athlete_name)}/{datetime.now().strftime('%Y%m%d-%H%M%S')}-{index}-{uuid.uuid4().hex[:8]}{extension}"
+    binary = base64.b64decode(encoded)
+    supabase_request(
+        "POST",
+        f"/storage/v1/object/{quote(supabase_storage_bucket(), safe='')}/{quote(filename, safe='/')}",
+        data=binary,
+        extra_headers={"Content-Type": mime_type, "x-upsert": "true"},
+    )
+    public_url = f"{supabase_url()}/storage/v1/object/public/{quote(supabase_storage_bucket(), safe='')}/{quote(filename, safe='/')}"
+    return {
+        "name": item.get("name", filename.rsplit("/", 1)[-1]),
+        "mime_type": mime_type,
+        "url": public_url,
+        "kind": "video" if mime_type.startswith("video/") else "image",
+    }
+
+
 def age_band(age: int) -> str:
     return age_framework(age)["label"]
 
@@ -1218,6 +1483,7 @@ def athlete_profile_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
     now = datetime.now().isoformat(timespec="seconds")
     return {
         "id": payload.get("athlete_id") or uuid.uuid4().hex,
+        "created_at": payload.get("created_at", now),
         "name": payload.get("name", "未命名学员").strip() or "未命名学员",
         "age": int(payload.get("age", 10) or 10),
         "trainee_group": payload.get("trainee_group", "青少年"),
@@ -1250,6 +1516,11 @@ def athlete_profile_from_payload(payload: dict[str, Any]) -> dict[str, Any]:
 def save_athlete_profile(payload: dict[str, Any]) -> dict[str, Any]:
     ensure_dirs()
     profile = athlete_profile_from_payload(payload)
+    if supabase_enabled():
+        try:
+            return save_athlete_profile_cloud(profile)
+        except Exception as exc:
+            print(f"Supabase athlete save failed, fallback to local storage: {exc}", file=sys.stderr)
     path = ATHLETE_DIR / f"{profile['id']}.json"
     path.write_text(json.dumps(profile, ensure_ascii=False, indent=2), encoding="utf-8")
     return profile
@@ -1257,6 +1528,11 @@ def save_athlete_profile(payload: dict[str, Any]) -> dict[str, Any]:
 
 def list_athlete_profiles(limit: int = 10) -> list[dict[str, Any]]:
     ensure_dirs()
+    if supabase_enabled():
+        try:
+            return list_athlete_profiles_cloud(limit)
+        except Exception as exc:
+            print(f"Supabase athlete list failed, fallback to local storage: {exc}", file=sys.stderr)
     profiles = []
     files = sorted(ATHLETE_DIR.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
     for path in files[:limit]:
@@ -1356,6 +1632,11 @@ def build_plan(payload: dict[str, Any]) -> dict[str, Any]:
 
 def recent_reports(limit: int = 6) -> list[dict[str, Any]]:
     ensure_dirs()
+    if supabase_enabled():
+        try:
+            return recent_reports_cloud(limit)
+        except Exception as exc:
+            print(f"Supabase recent reports failed, fallback to local storage: {exc}", file=sys.stderr)
     files = sorted(REPORT_DIR.glob("*.json"), key=lambda item: item.stat().st_mtime, reverse=True)
     reports = []
     for path in files[:limit]:
@@ -1379,6 +1660,11 @@ def recent_reports(limit: int = 6) -> list[dict[str, Any]]:
 
 def athlete_report_history(athlete: dict[str, Any], limit: int = 6) -> list[dict[str, Any]]:
     ensure_dirs()
+    if supabase_enabled():
+        try:
+            return athlete_report_history_cloud(athlete, limit)
+        except Exception as exc:
+            print(f"Supabase athlete history failed, fallback to local storage: {exc}", file=sys.stderr)
     athlete_id = athlete.get("id", "")
     athlete_name = athlete.get("name", "")
     history: list[dict[str, Any]] = []
@@ -1491,6 +1777,11 @@ def report_progress_linkage(plan: dict[str, Any], history: list[dict[str, Any]])
 
 
 def decode_data_url(item: dict[str, Any], athlete_name: str, index: int) -> dict[str, Any]:
+    if supabase_enabled():
+        try:
+            return upload_media_to_supabase(item, athlete_name, index)
+        except Exception as exc:
+            print(f"Supabase media upload failed, fallback to local storage: {exc}", file=sys.stderr)
     raw = item.get("data_url", "")
     match = re.match(r"data:(.*?);base64,(.*)", raw)
     if not match:
@@ -1561,6 +1852,18 @@ def save_report(payload: dict[str, Any]) -> dict[str, Any]:
         "parent_summary": summary + (session.get("coach_notes", "") or ""),
         "parent_friendly": parent_friendly,
     }
+    if supabase_enabled():
+        try:
+            supabase_request(
+                "POST",
+                "/rest/v1/reports",
+                query={"on_conflict": "id"},
+                json_body=report_to_db_row(report),
+                extra_headers={"Prefer": "resolution=merge-duplicates,return=representation"},
+            )
+            return report
+        except Exception as exc:
+            print(f"Supabase report save failed, fallback to local storage: {exc}", file=sys.stderr)
     filename = f"{sanitize_filename(athlete_name)}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.json"
     path = REPORT_DIR / filename
     path.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")

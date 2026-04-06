@@ -92,6 +92,24 @@ HOST=0.0.0.0 PORT=8899 ENABLE_RELOAD=0 python3 app.py
 - Render 磁盘默认不是持久化存储，`output/athletes`、`output/reports`、`output/media` 中的数据在服务重建后可能丢失。
 - 如果你准备正式使用，建议下一步把档案、报告和媒体迁移到对象存储或数据库。
 
+## Supabase 持久化
+
+当前版本支持通过 Supabase 持久化学员档案、训练报告和训练媒体。
+
+Render 中建议配置这些环境变量：
+
+- `SUPABASE_URL`
+- `SUPABASE_SERVICE_ROLE_KEY`
+- `SUPABASE_STORAGE_BUCKET=training-media`
+
+配置完成后：
+
+- 学员档案会写入 `athletes` 表
+- 训练报告会写入 `reports` 表
+- 训练照片和短视频会上传到 `training-media` bucket
+
+如果未配置 Supabase，应用仍会回退到本地 `output` 目录保存数据。
+
 ## 上传到 GitHub 前
 
 项目已经包含 `.gitignore`，会自动忽略：
