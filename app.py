@@ -2199,14 +2199,30 @@ def index_html() -> bytes:
 
     <section class="hero">
       <div class="hero-copy">
-        <p class="hero-kicker">神兽体育青少年训练系统</p>
-        <h1>神兽体育青少年体适能训练会员课件系统与报告平台</h1>
-        <p class="subtitle">覆盖幼儿、青少年与成人三类训练对象，支持真实教练课模版、60/90 分钟课次编排、学员档案管理和家长图文报告输出，适配早教、私教课、小班课/团课、专项（闯关）训练与跑步训练场景。</p>
+        <div class="hero-brand-plate">
+          <img src="/static/brand-wordmark-vi023-card.png" alt="神兽体育品牌标识" />
+        </div>
+        <div class="hero-copy-body">
+          <h1>
+            <span class="hero-line hero-line-brand">神兽体育IT管理系统</span>
+            <span class="hero-line hero-line-main">会员课件生成系统</span>
+            <span class="hero-line hero-line-sub">训练报告管理平台</span>
+          </h1>
+          <p class="subtitle">覆盖幼儿、青少年与成人三类训练对象，支持真实教练课模版、60/90 分钟课次编排、学员档案管理和家长图文报告输出，适配早教、私教课、小班课/团课、专项（闯关）训练与跑步训练场景。</p>
+        </div>
       </div>
       <div class="hero-card">
-        <span>适用场景</span>
-        <strong>建档 / 排课 / 带课 / 复盘 / 家长沟通</strong>
-        <p>支持周期训练计划、动作要求、示范视频入口、学员档案列表、训练照片短视频归档和家长版课后图文汇报。</p>
+        <div class="hero-card-copy">
+          <span>适用场景</span>
+          <strong>建档 / 排课 / 带课 / 复盘 / 家长沟通</strong>
+          <p>支持周期训练计划、动作要求、示范视频入口、学员档案列表、训练照片短视频归档和家长版课后图文汇报。</p>
+        </div>
+        <div class="hero-scene-list">
+          <span>训练计划</span>
+          <span>单节课教案</span>
+          <span>家长汇报</span>
+          <span>会员档案</span>
+        </div>
       </div>
     </section>
 
