@@ -1,0 +1,12 @@
+services:
+  - type: web
+    name: mythical-creatures-sports
+    runtime: python
+    plan: free
+    buildCommand: echo "No build step required"
+    startCommand: python3 app.py
+    envVars:
+      - key: HOST
+        value: 0.0.0.0
+      - key: ENABLE_RELOAD
+        value: "0"

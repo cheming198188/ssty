@@ -1,0 +1,15 @@
+.DS_Store
+.local/
+.pycache/
+.tmp/
+tmp/
+
+output/athletes/*.json
+output/reports/*.json
+output/media/*
+output/doc/*
+
+!output/athletes/.gitkeep
+!output/reports/.gitkeep
+!output/media/.gitkeep
+!output/doc/.gitkeep
