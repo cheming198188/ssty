@@ -689,15 +689,15 @@ def sanitize_filename(text: str) -> str:
 
 
 def supabase_url() -> str:
-    return os.environ.get(SUPABASE_URL_ENV, "").rstrip("/")
+    return os.environ.get(SUPABASE_URL_ENV, "").strip().rstrip("/")
 
 
 def supabase_service_key() -> str:
-    return os.environ.get(SUPABASE_SERVICE_ROLE_KEY_ENV, "")
+    return os.environ.get(SUPABASE_SERVICE_ROLE_KEY_ENV, "").strip()
 
 
 def supabase_storage_bucket() -> str:
-    return os.environ.get(SUPABASE_STORAGE_BUCKET_ENV, DEFAULT_STORAGE_BUCKET)
+    return os.environ.get(SUPABASE_STORAGE_BUCKET_ENV, DEFAULT_STORAGE_BUCKET).strip()
 
 
 def supabase_enabled() -> bool:
