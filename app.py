@@ -5,11 +5,13 @@ import json
 import mimetypes
 import os
 import re
+import secrets
 import signal
 import subprocess
 import sys
 import time
 import uuid
+from http.cookies import SimpleCookie
 from datetime import datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -35,6 +37,13 @@ SUPABASE_URL_ENV = "SUPABASE_URL"
 SUPABASE_SERVICE_ROLE_KEY_ENV = "SUPABASE_SERVICE_ROLE_KEY"
 SUPABASE_STORAGE_BUCKET_ENV = "SUPABASE_STORAGE_BUCKET"
 DEFAULT_STORAGE_BUCKET = "training-media"
+ADMIN_USERNAME_ENV = "APP_ADMIN_USERNAME"
+ADMIN_PASSWORD_ENV = "APP_ADMIN_PASSWORD"
+COACH_USERNAME_ENV = "APP_COACH_USERNAME"
+COACH_PASSWORD_ENV = "APP_COACH_PASSWORD"
+SESSION_COOKIE_NAME = "mcs_session"
+SESSION_TTL_SECONDS = 60 * 60 * 12
+SESSION_STORE: dict[str, dict[str, Any]] = {}
 
 
 BOOTSTRAP_DATA = {
@@ -702,6 +711,84 @@ def supabase_storage_bucket() -> str:
 
 def supabase_enabled() -> bool:
     return bool(supabase_url() and supabase_service_key())
+
+
+def configured_users() -> list[dict[str, str]]:
+    return [
+        {
+            "username": os.environ.get(ADMIN_USERNAME_ENV, "admin").strip() or "admin",
+            "password": os.environ.get(ADMIN_PASSWORD_ENV, "admin123456").strip() or "admin123456",
+            "role": "admin",
+            "label": "管理员",
+        },
+        {
+            "username": os.environ.get(COACH_USERNAME_ENV, "coach").strip() or "coach",
+            "password": os.environ.get(COACH_PASSWORD_ENV, "coach123456").strip() or "coach123456",
+            "role": "coach",
+            "label": "教练",
+        },
+    ]
+
+
+def role_label(role: str) -> str:
+    return "管理员" if role == "admin" else "教练"
+
+
+def auth_identity_payload(user: dict[str, str]) -> dict[str, str]:
+    return {"username": user["username"], "role": user["role"], "role_label": role_label(user["role"])}
+
+
+def create_session(user: dict[str, str]) -> str:
+    token = secrets.token_urlsafe(32)
+    SESSION_STORE[token] = {
+        "username": user["username"],
+        "role": user["role"],
+        "expires_at": time.time() + SESSION_TTL_SECONDS,
+    }
+    return token
+
+
+def session_from_token(token: str) -> dict[str, Any] | None:
+    session = SESSION_STORE.get(token)
+    if not session:
+        return None
+    if session.get("expires_at", 0) < time.time():
+        SESSION_STORE.pop(token, None)
+        return None
+    session["expires_at"] = time.time() + SESSION_TTL_SECONDS
+    return session
+
+
+def parse_cookie_header(header: str | None) -> SimpleCookie[str]:
+    cookie = SimpleCookie()
+    if header:
+        cookie.load(header)
+    return cookie
+
+
+def current_identity_from_headers(headers: Any) -> dict[str, Any] | None:
+    cookie = parse_cookie_header(headers.get("Cookie"))
+    token = cookie.get(SESSION_COOKIE_NAME)
+    if not token:
+        return None
+    return session_from_token(token.value)
+
+
+def authenticate_user(username: str, password: str) -> dict[str, str] | None:
+    normalized_username = username.strip()
+    normalized_password = password.strip()
+    for user in configured_users():
+        if user["username"] == normalized_username and user["password"] == normalized_password:
+            return user
+    return None
+
+
+def session_cookie(token: str) -> str:
+    return f"{SESSION_COOKIE_NAME}={token}; Path=/; HttpOnly; SameSite=Lax; Max-Age={SESSION_TTL_SECONDS}"
+
+
+def clear_session_cookie() -> str:
+    return f"{SESSION_COOKIE_NAME}=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
 
 
 def supabase_request(
@@ -2004,6 +2091,20 @@ def index_html() -> bytes:
 </head>
 <body>
   <main class="page">
+    <section class="auth-bar panel">
+      <div class="auth-bar-copy">
+        <p class="section-tag">Access Control</p>
+        <strong>教练账号与权限管理</strong>
+      </div>
+      <div class="auth-user">
+        <div>
+          <span id="auth-role-pill" class="status-pill">未登录</span>
+          <p id="auth-user-text">请先登录后再使用教练工作台。</p>
+        </div>
+        <button id="logout-btn" class="ghost" type="button" hidden>退出登录</button>
+      </div>
+    </section>
+
     <section class="hero">
       <div class="hero-copy">
         <p class="hero-kicker">神兽体育青少年训练系统</p>
@@ -2175,6 +2276,30 @@ def index_html() -> bytes:
     </section>
   </main>
 
+  <div id="auth-gate" class="auth-gate active">
+    <div class="auth-card">
+      <p class="section-tag">Coach Login</p>
+      <h2>登录神兽体育教练工作台</h2>
+      <p class="auth-intro">系统现支持“管理员”和“教练”两类账号。管理员可删除学员与报告，教练可进行建档、排课、带课与课后记录。</p>
+      <form id="login-form" class="auth-form">
+        <label class="field"><span>账号</span><input id="login-username" autocomplete="username" placeholder="请输入账号" /></label>
+        <label class="field"><span>密码</span><input id="login-password" type="password" autocomplete="current-password" placeholder="请输入密码" /></label>
+        <button id="login-btn" class="primary" type="submit">登录进入系统</button>
+      </form>
+      <div id="auth-message" class="auth-message">未登录时，系统不会加载学员和训练数据。</div>
+      <div class="auth-tip-grid">
+        <article>
+          <strong>管理员</strong>
+          <p>可删除学员档案、训练报告和关联素材，适合店长或负责人。</p>
+        </article>
+        <article>
+          <strong>教练</strong>
+          <p>可正常建档、排课、记录训练和生成家长报告，但不能做高风险删除操作。</p>
+        </article>
+      </div>
+    </div>
+  </div>
+
   <script src="/static/app.js"></script>
 </body>
 </html>
@@ -2221,6 +2346,25 @@ def run_with_reloader() -> None:
 
 
 class AppHandler(BaseHTTPRequestHandler):
+    def current_identity(self) -> dict[str, Any] | None:
+        return current_identity_from_headers(self.headers)
+
+    def require_identity(self) -> dict[str, Any] | None:
+        identity = self.current_identity()
+        if identity:
+            return identity
+        self.respond_json({"error": "请先登录后再继续操作", "auth_required": True}, status=401)
+        return None
+
+    def require_admin(self) -> dict[str, Any] | None:
+        identity = self.require_identity()
+        if not identity:
+            return None
+        if identity.get("role") == "admin":
+            return identity
+        self.respond_json({"error": "当前操作仅管理员可用", "forbidden": True}, status=403)
+        return None
+
     def do_HEAD(self) -> None:
         parsed = urlparse(self.path)
         if parsed.path == "/":
@@ -2242,17 +2386,34 @@ class AppHandler(BaseHTTPRequestHandler):
             self.respond(index_html(), "text/html; charset=utf-8")
             return
 
+        if parsed.path == "/api/auth-status":
+            identity = self.current_identity()
+            self.respond_json(
+                {
+                    "authenticated": bool(identity),
+                    "user": auth_identity_payload(identity) if identity else None,
+                }
+            )
+            return
+
         if parsed.path == "/api/bootstrap":
+            identity = self.require_identity()
+            if not identity:
+                return
             self.respond_json(
                 {
                     **BOOTSTRAP_DATA,
                     "recent_reports": recent_reports(),
                     "athlete_profiles": list_athlete_profiles(),
+                    "auth": {"authenticated": True, "user": auth_identity_payload(identity)},
                 }
             )
             return
 
         if parsed.path.startswith("/media/"):
+            identity = self.require_identity()
+            if not identity:
+                return
             filename = unquote(parsed.path.removeprefix("/media/"))
             target = MEDIA_DIR / filename
             if not target.exists():
@@ -2277,12 +2438,40 @@ class AppHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         payload = self.read_json()
 
+        if parsed.path == "/api/login":
+            username = str(payload.get("username", "")).strip()
+            password = str(payload.get("password", "")).strip()
+            user = authenticate_user(username, password)
+            if not user:
+                self.respond_json({"error": "账号或密码不正确"}, status=401)
+                return
+            token = create_session(user)
+            self.respond_json(
+                {"message": "登录成功", "user": auth_identity_payload(user)},
+                extra_headers={"Set-Cookie": session_cookie(token)},
+            )
+            return
+
+        if parsed.path == "/api/logout":
+            cookie = parse_cookie_header(self.headers.get("Cookie"))
+            token = cookie.get(SESSION_COOKIE_NAME)
+            if token:
+                SESSION_STORE.pop(token.value, None)
+            self.respond_json({"message": "已退出登录"}, extra_headers={"Set-Cookie": clear_session_cookie()})
+            return
+
+        identity = self.require_identity()
+        if not identity:
+            return
+
         if parsed.path == "/api/save-athlete-profile":
             profile = save_athlete_profile(payload)
             self.respond_json({"message": "学员档案已保存", "profile": profile, "athlete_profiles": list_athlete_profiles()})
             return
 
         if parsed.path == "/api/delete-athlete-profile":
+            if not self.require_admin():
+                return
             athlete_id = str(payload.get("id", "")).strip()
             if not athlete_id:
                 self.respond_json({"error": "缺少学员 ID"}, status=400)
@@ -2323,6 +2512,8 @@ class AppHandler(BaseHTTPRequestHandler):
             return
 
         if parsed.path == "/api/delete-session-report":
+            if not self.require_admin():
+                return
             report_id = str(payload.get("id", "")).strip()
             if not report_id:
                 self.respond_json({"error": "缺少报告 ID"}, status=400)
@@ -2359,15 +2550,18 @@ class AppHandler(BaseHTTPRequestHandler):
     def log_message(self, format: str, *args: Any) -> None:
         return
 
-    def respond(self, body: bytes, content_type: str, status: int = 200) -> None:
+    def respond(self, body: bytes, content_type: str, status: int = 200, extra_headers: dict[str, str] | None = None) -> None:
         self.send_response(status)
         self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
+        if extra_headers:
+            for key, value in extra_headers.items():
+                self.send_header(key, value)
         self.end_headers()
         self.wfile.write(body)
 
-    def respond_json(self, payload: dict[str, Any], status: int = 200) -> None:
-        self.respond(json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8", status)
+    def respond_json(self, payload: dict[str, Any], status: int = 200, extra_headers: dict[str, str] | None = None) -> None:
+        self.respond(json.dumps(payload, ensure_ascii=False).encode("utf-8"), "application/json; charset=utf-8", status, extra_headers=extra_headers)
 
 
 def main() -> None:

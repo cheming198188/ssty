@@ -18,6 +18,15 @@ const athleteList = document.getElementById("athlete-list");
 const athleteSearchEl = document.getElementById("athlete-search");
 const parentReportPreview = document.getElementById("parent-report-preview");
 const lessonDetail = document.getElementById("lesson-detail");
+const authGate = document.getElementById("auth-gate");
+const loginForm = document.getElementById("login-form");
+const loginUsernameEl = document.getElementById("login-username");
+const loginPasswordEl = document.getElementById("login-password");
+const loginBtn = document.getElementById("login-btn");
+const authMessageEl = document.getElementById("auth-message");
+const authRolePill = document.getElementById("auth-role-pill");
+const authUserText = document.getElementById("auth-user-text");
+const logoutBtn = document.getElementById("logout-btn");
 
 const nameEl = document.getElementById("name");
 const traineeGroupEl = document.getElementById("trainee-group");
@@ -59,9 +68,48 @@ let currentPlan = null;
 let currentAthleteId = "";
 let selectedLessonId = "";
 let currentReport = null;
+let authState = { authenticated: false, user: null };
 
 function formatUpdatedAt(value) {
   return value ? String(value).replace("T", " ") : "刚刚";
+}
+
+function isAdmin() {
+  return authState?.user?.role === "admin";
+}
+
+function setAuthMessage(text, variant = "idle") {
+  if (!authMessageEl) return;
+  authMessageEl.textContent = text;
+  authMessageEl.dataset.variant = variant;
+}
+
+function applyAuthState(state) {
+  authState = state || { authenticated: false, user: null };
+  const authenticated = Boolean(authState.authenticated && authState.user);
+  document.body.classList.toggle("locked", !authenticated);
+  authGate?.classList.toggle("active", !authenticated);
+  authRolePill.textContent = authenticated ? authState.user.role_label || authState.user.role : "未登录";
+  authRolePill.dataset.variant = authenticated ? "success" : "idle";
+  authUserText.textContent = authenticated
+    ? `${authState.user.username} 已登录，当前权限：${authState.user.role_label || authState.user.role}`
+    : "请先登录后再使用教练工作台。";
+  logoutBtn.hidden = !authenticated;
+  if (!authenticated) {
+    loginPasswordEl.value = "";
+    currentPlan = null;
+    currentReport = null;
+    selectedLessonId = "";
+    currentAthleteId = "";
+    emptyState.classList.remove("hidden");
+    planOutput.classList.add("hidden");
+    renderAthleteList([]);
+    renderRecentReports([]);
+    renderLessonDetail(null);
+    renderParentReportPreview(null);
+  } else {
+    setAuthMessage("登录成功后，系统会自动加载学员和训练数据。", "success");
+  }
 }
 
 function escapeHtml(value) {
@@ -87,6 +135,10 @@ async function requestJson(url, options = {}) {
   const response = await fetch(url, options);
   const data = await response.json();
   if (!response.ok) {
+    if (response.status === 401) {
+      applyAuthState({ authenticated: false, user: null });
+      setAuthMessage(data.error || "登录状态已失效，请重新登录。", "error");
+    }
     throw new Error(data.error || `Request failed: ${response.status}`);
   }
   return data;
@@ -252,6 +304,9 @@ function syncAgeBoundsByGroup() {
 
 function renderAthleteList(items = []) {
   const visibleItems = filteredAthletes(items);
+  const deleteAction = isAdmin()
+    ? (item) => `<button class="card-delete-btn" type="button" data-delete-athlete-id="${item.id}" aria-label="删除 ${item.name} 档案">删除</button>`
+    : () => "";
 
   if (items.length && !visibleItems.length) {
     athleteList.innerHTML = `<div class="recent-empty">没有找到匹配的会员，请尝试输入其他姓名或家长手机号。</div>`;
@@ -275,7 +330,7 @@ function renderAthleteList(items = []) {
             <p>${item.goal || "目标待补充"} · ${item.training_type || "课程类型待补充"}</p>
             <small>家长 ${item.guardian_phone || "未填写"} · ${item.session_duration_min || 60} 分钟课 · 更新于 ${formatUpdatedAt(item.updated_at)}</small>
           </button>
-          <button class="card-delete-btn" type="button" data-delete-athlete-id="${item.id}" aria-label="删除 ${item.name} 档案">删除</button>
+          ${deleteAction(item)}
         </article>
       `,
     )
@@ -883,6 +938,9 @@ function renderParentTemplate(plan) {
 }
 
 function renderRecentReports(items = []) {
+  const deleteAction = isAdmin()
+    ? (item) => `<button class="card-delete-btn" type="button" data-delete-report-id="${item.id}" aria-label="删除 ${item.athlete_name} 的训练报告">删除</button>`
+    : () => "";
   if (!items.length) {
     recentReports.innerHTML = `<div class="recent-empty">还没有保存的训练报告，完成一次课后记录后会显示在这里。</div>`;
     return;
@@ -896,7 +954,7 @@ function renderRecentReports(items = []) {
               <strong>${item.athlete_name}</strong>
               <span>${item.date || "待补充日期"}</span>
             </div>
-            <button class="card-delete-btn" type="button" data-delete-report-id="${item.id}" aria-label="删除 ${item.athlete_name} 的训练报告">删除</button>
+            ${deleteAction(item)}
           </div>
           <p>${item.goal || "训练目标待补充"}</p>
           <small>${item.summary || "本次已记录训练表现。"} · 投入度 ${item.engagement || "良好"} · 素材 ${item.media_count || 0} 个</small>
@@ -1433,6 +1491,9 @@ function renderParentReportPreview(report) {
 
 async function loadBootstrap() {
   bootstrapData = await requestJson("/api/bootstrap");
+  if (bootstrapData.auth) {
+    applyAuthState(bootstrapData.auth);
+  }
   renderOptions(trainingGoalEl, bootstrapData.goals);
   renderOptions(traineeGroupEl, bootstrapData.trainee_groups);
   renderOptions(cycleWeeksEl, bootstrapData.cycles, (value) => `${value} 周`);
@@ -1445,6 +1506,53 @@ async function loadBootstrap() {
   sessionDateEl.value = new Date().toISOString().slice(0, 10);
   reportDurationEl.value = bootstrapData.durations[0];
   syncAgeBoundsByGroup();
+}
+
+async function fetchAuthStatus() {
+  const auth = await requestJson("/api/auth-status");
+  applyAuthState(auth);
+  return auth;
+}
+
+async function handleLogin(event) {
+  event.preventDefault();
+  loginBtn.disabled = true;
+  setAuthMessage("登录中，请稍候…", "idle");
+  try {
+    const response = await requestJson("/api/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        username: loginUsernameEl.value.trim(),
+        password: loginPasswordEl.value,
+      }),
+    });
+    applyAuthState({ authenticated: true, user: response.user });
+    await loadBootstrap();
+    setStatus("已登录，系统数据已载入", "success");
+  } catch (error) {
+    setAuthMessage(error.message, "error");
+  } finally {
+    loginBtn.disabled = false;
+  }
+}
+
+async function handleLogout() {
+  logoutBtn.disabled = true;
+  try {
+    await requestJson("/api/logout", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    bootstrapData = null;
+    applyAuthState({ authenticated: false, user: null });
+    setStatus("已退出登录", "idle");
+  } catch (error) {
+    setStatus(error.message, "error");
+  } finally {
+    logoutBtn.disabled = false;
+  }
 }
 
 async function refreshArchiveAndReports(response) {
@@ -1664,11 +1772,26 @@ newAthleteBtn?.addEventListener("click", startNewAthlete);
 saveProfileBtn.addEventListener("click", handleSaveProfile);
 planForm.addEventListener("submit", handleGeneratePlan);
 reportForm.addEventListener("submit", handleSaveReport);
+loginForm?.addEventListener("submit", handleLogin);
+logoutBtn?.addEventListener("click", handleLogout);
 sessionDurationEl.addEventListener("change", () => {
   reportDurationEl.value = sessionDurationEl.value;
 });
 traineeGroupEl.addEventListener("change", syncAgeBoundsByGroup);
 
-loadBootstrap().catch((error) => {
-  setStatus(error.message, "error");
-});
+async function initializeApp() {
+  try {
+    const auth = await fetchAuthStatus();
+    if (auth.authenticated) {
+      await loadBootstrap();
+      setStatus("已登录，等待生成", "idle");
+    } else {
+      setAuthMessage("请输入教练账号和密码后进入系统。", "idle");
+      setStatus("请先登录", "idle");
+    }
+  } catch (error) {
+    setStatus(error.message, "error");
+  }
+}
+
+initializeApp();
