@@ -56,7 +56,7 @@ BOOTSTRAP_DATA = {
         "减脂与习惯养成",
     ],
     "cycles": [4, 8, 12],
-    "frequencies": [2, 3, 4],
+    "frequencies": [1, 2, 3, 4],
     "durations": [60, 90],
     "training_types": ["早教", "私教课", "小班课/团课", "专项（闯关）训练", "跑步训练"],
     "trainee_groups": ["幼儿", "青少年", "成人"],
